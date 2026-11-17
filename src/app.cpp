@@ -59,28 +59,30 @@ static void update_usb_output() {
 #endif
 }
 
+static volatile bool hotkey_reset_requested = false;
+
 // Raw キー押下ハンドラ
 void OnRawPress(uint8_t keycode) {
     uint32_t now = millis();
 
-    // 復帰用ホットキー: Left Ctrlを素早く3回連続で押すと切替器ポートを強制リセット
-    static uint32_t last_ctrl_time = 0;
-    static uint8_t ctrl_tap_count = 0;
-    if (keycode == 103) { // Left Ctrl
-        if (now - last_ctrl_time <= 600) {
-            ctrl_tap_count++;
-            if (ctrl_tap_count >= 3) {
-                ctrl_tap_count = 0;
-                Serial.println("[HOTKEY] Triple-Ctrl recovery triggered!");
-                USBHost::reset_host_port();
+    // 復帰用ホットキー: Right Shiftを素早く3回連続で押すと切替器ポートを強制リセット
+    // ※ ISR内から直接リセットを実行するとデッドロックするため、フラグを立ててloop()側で安全に実行
+    static uint32_t last_shift_time = 0;
+    static uint8_t shift_tap_count = 0;
+    if (keycode == 108) { // Right Shift
+        if (now - last_shift_time <= 700) {
+            shift_tap_count++;
+            if (shift_tap_count >= 3) {
+                shift_tap_count = 0;
+                hotkey_reset_requested = true;
                 return;
             }
         } else {
-            ctrl_tap_count = 1;
+            shift_tap_count = 1;
         }
-        last_ctrl_time = now;
+        last_shift_time = now;
     } else {
-        ctrl_tap_count = 0;
+        shift_tap_count = 0;
     }
 
     if (keycode >= 103 && keycode < 111) {
@@ -94,11 +96,6 @@ void OnRawPress(uint8_t keycode) {
         converter.onPhysicalKeyPress(keycode, physical_modifiers);
         update_usb_output();
     }
-
-#if defined(DEBUG)
-    Serial.printf("Press raw: 0x%02X, PhysMod: 0x%02X, OutMod: 0x%02X\n",
-                  keycode, physical_modifiers, converter.getOutputModifiers());
-#endif
 }
 
 // Raw キー解放ハンドラ
@@ -114,11 +111,6 @@ void OnRawRelease(uint8_t keycode) {
         converter.onPhysicalKeyRelease(keycode);
         update_usb_output();
     }
-
-#if defined(DEBUG)
-    Serial.printf("Release raw: 0x%02X, PhysMod: 0x%02X, OutMod: 0x%02X\n",
-                  keycode, physical_modifiers, converter.getOutputModifiers());
-#endif
 }
 
 // メディアキー・特殊キー押下ハンドラ
@@ -249,6 +241,13 @@ void loop() {
                       (int)mouse_now,
                       USBHS_PORTSC1,
                       digitalRead(0));
+    }
+
+    // 復帰用ホットキートリガー (Right Shift 3回押し)
+    if (hotkey_reset_requested) {
+        hotkey_reset_requested = false;
+        Serial.println("[HOTKEY] Triple-RightShift recovery triggered!");
+        USBHost::reset_host_port();
     }
 
     // 復帰用ボタントリガー (Pin 0 を GND に接続/プッシュスイッチで復帰)

@@ -117,18 +117,13 @@ void USBHost::disconnect_root() {
 }
 
 void USBHost::reset_host_port() {
-	println("reset_host_port: power cycling host VBUS and resetting port");
+	println("reset_host_port: power cycling host VBUS");
 #if defined(__MK66FX1M0__)
-	// Power cycle USB host port VBUS (cuts 5V to KVM switch)
+	// Power cycle USB host port VBUS (cuts 5V to KVM switch - electrical unplug/replug)
 	GPIOE_PCOR = (1 << 6); // VBUS OFF
-	delay(150);
+	delay(250);
 	GPIOE_PSOR = (1 << 6); // VBUS ON
-	delay(100);
 #endif
-	disconnect_root();
-	port_state = PORT_STATE_DEBOUNCE;
-	USBHS_GPTIMER0LD = 100000; // 100 ms debounce
-	USBHS_GPTIMER0CTL = USBHS_GPTIMERCTL_RST | USBHS_GPTIMERCTL_RUN;
 }
 
 void USBHost::on_device_disconnected(Device_t *dev) {
@@ -400,22 +395,12 @@ void USBHost::isr()
 				free_Transfer(p);
 				p = next;
 			} else {
-				uint32_t token = p->qtd.token;
-				if (!(token & 0x80) && (token & 0x7C)) {
-					// periodic transfer error / halt (e.g. KVM switch disconnect)
-					println("periodic transfer error in UPI");
-					host_needs_recovery = true;
-					break;
-				}
 				// transfer still pending
 				p = p->next_followup;
 			}
 		}
 	}
 	if (stat & USBHS_USBSTS_UEI) {
-#if defined(DEBUG)
-		Serial.printf("[EHCI] UEI USB Error stat=0x%08X\n", stat);
-#endif
 		followup_Error();
 	}
 
@@ -441,7 +426,8 @@ void USBHost::isr()
 			} else {
 				println("    disconnect");
 				port_state = PORT_STATE_DISCONNECTED;
-				host_needs_recovery = true;
+				USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
+				disconnect_root();
 			}
 		}
 		if (portstat & USBHS_PORTSC_PEC) {
@@ -1050,21 +1036,6 @@ void USBHost::followup_Error(void)
 
 		transfer = next;
 	}
-	// Handle errors from periodic schedule (e.g. KVM switch disconnect)
-	Transfer_t *p = periodic_followup_first;
-	bool periodic_error = false;
-	while (p) {
-		uint32_t token = p->qtd.token;
-		if (!(token & 0x80) && (token & 0x7C)) {
-			periodic_error = true;
-			break;
-		}
-		p = p->next_followup;
-	}
-	if (periodic_error) {
-		println("periodic transfer error in followup_Error");
-		host_needs_recovery = true;
-	}
 	println("end of error followu");
 }
 
@@ -1074,15 +1045,6 @@ static uint32_t last_recovery_time = 0;
 void USBHost::check_reconnect()
 {
 	uint32_t now = millis();
-	if (host_needs_recovery) {
-		host_needs_recovery = false;
-		if (now - last_recovery_time >= 3000) {
-			last_recovery_time = now;
-			println("check_reconnect: resetting host port due to transfer error");
-			reset_host_port();
-			return;
-		}
-	}
 	if (port_state == PORT_STATE_DISCONNECTED) {
 		uint32_t portstat = USBHS_PORTSC1;
 		if (portstat & USBHS_PORTSC_CCS) {
@@ -1447,10 +1409,15 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 			// find the previous QH in the async schedule loop
 			println("  remove QH from async schedule");
 			Pipe_t *prev = next;
-			while (1) {
+			uint32_t safety = 1000;
+			while (prev && --safety) {
 				Pipe_t *n = (Pipe_t *)(prev->qh.horizontal_link & 0xFFFFFFE0);
 				if (n == pipe) break;
 				prev = n;
+			}
+			if (!prev || safety == 0) {
+				println("  failed to find QH in async schedule");
+				return;
 			}
 			// if removing the one with H bit, set another
 			if (pipe->qh.capabilities[0] & 0x8000) {
@@ -1503,7 +1470,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 				continue;
 			}
 			Pipe_t *prev = node;
-			while (1) {
+			uint32_t safety = 1000;
+			while (node && --safety) {
 				num = node->qh.horizontal_link;
 				if (num & 1) break;
 				node = (Pipe_t *)(num & 0xFFFFFFE0);
@@ -1515,25 +1483,27 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 			}
 		}
 		// subtract bandwidth from uframe_bandwidth array
-		if (pipe->device->speed == 2) {
-			uint32_t interval = pipe->bandwidth_interval;
-			uint32_t offset = pipe->bandwidth_offset;
-			uint32_t stime = pipe->bandwidth_stime;
-			for (uint32_t i=offset; i < PERIODIC_LIST_SIZE*8; i += interval) {
-				uframe_bandwidth[i] -= stime;
-			}
-		} else {
-			uint32_t interval = pipe->bandwidth_interval;
-			uint32_t offset = pipe->bandwidth_offset;
-			uint32_t shift = pipe->bandwidth_shift;
-			uint32_t stime = pipe->bandwidth_stime;
-			uint32_t ctime = pipe->bandwidth_ctime;
-			for (uint32_t i=offset; i < PERIODIC_LIST_SIZE; i += interval) {
-				uint32_t n = (i << 3) + shift;
-				uframe_bandwidth[n+0] -= stime;
-				uframe_bandwidth[n+2] -= ctime;
-				uframe_bandwidth[n+3] -= ctime;
-				uframe_bandwidth[n+4] -= ctime;
+		if (pipe->device && pipe->bandwidth_interval > 0) {
+			if (pipe->device->speed == 2) {
+				uint32_t interval = pipe->bandwidth_interval;
+				uint32_t offset = pipe->bandwidth_offset;
+				uint32_t stime = pipe->bandwidth_stime;
+				for (uint32_t i=offset; i < PERIODIC_LIST_SIZE*8; i += interval) {
+					uframe_bandwidth[i] -= stime;
+				}
+			} else {
+				uint32_t interval = pipe->bandwidth_interval;
+				uint32_t offset = pipe->bandwidth_offset;
+				uint32_t shift = pipe->bandwidth_shift;
+				uint32_t stime = pipe->bandwidth_stime;
+				uint32_t ctime = pipe->bandwidth_ctime;
+				for (uint32_t i=offset; i < PERIODIC_LIST_SIZE; i += interval) {
+					uint32_t n = (i << 3) + shift;
+					uframe_bandwidth[n+0] -= stime;
+					uframe_bandwidth[n+2] -= ctime;
+					uframe_bandwidth[n+3] -= ctime;
+					uframe_bandwidth[n+4] -= ctime;
+				}
 			}
 		}
 
