@@ -131,7 +131,8 @@ Device_t * USBHost::new_Device(uint32_t speed, uint32_t hub_addr, uint32_t hub_p
 		devlist = dev;
 	} else {
 		Device_t *p;
-		for (p = devlist; p->next; p = p->next) ; // walk devlist
+		uint32_t dev_safety = 64;
+		for (p = devlist; p->next && --dev_safety; p = p->next) ; // walk devlist
 		p->next = dev;
 	}
 	dev->enum_state = 0;
@@ -380,8 +381,13 @@ void USBHost::claim_drivers(Device_t *dev)
 	USBDriver *driver, *prev=NULL;
 
 	// first check if any driver wishes to claim the entire device
-	for (driver=available_drivers; driver != NULL; driver = driver->next) {
-		if (driver->device != NULL) continue;
+	g_dbg_stage = 241;
+	uint32_t drv_safety1 = 64;
+	for (driver=available_drivers; driver != NULL && --drv_safety1; driver = driver->next) {
+		if (driver->device != NULL) {
+			prev = driver;
+			continue;
+		}
 		if (driver->claim(dev, 0, enumbuf + 9, enumlen - 9)) {
 			if (prev) {
 				prev->next = driver->next;
@@ -456,7 +462,8 @@ void USBHost::claim_drivers(Device_t *dev)
 
 static bool address_in_use(uint32_t addr)
 {
-	for (Device_t *p = devlist; p; p = p->next) {
+	uint32_t dev_safety = 64;
+	for (Device_t *p = devlist; p && --dev_safety; p = p->next) {
 		if (p->address == addr) return true;
 	}
 	return false;
@@ -464,15 +471,17 @@ static bool address_in_use(uint32_t addr)
 
 uint32_t USBHost::assign_address(void)
 {
+	g_dbg_stage = 242;
 	static uint8_t last_assigned_address=0;
 	uint32_t addr = last_assigned_address;
-	while (1) {
+	for (uint32_t i = 0; i < 128; i++) {
 		if (++addr > 127) addr = 1;
 		if (!address_in_use(addr)) {
 			last_assigned_address = addr;
 			return addr;
 		}
 	}
+	return 1;
 }
 
 static void pipe_set_maxlen(Pipe_t *pipe, uint32_t maxlen)
@@ -505,13 +514,27 @@ void USBHost::disconnect_Device(Device_t *dev)
 	print_driverlist("dev->drivers", dev->drivers);
 	g_dbg_stage = 211;
 	uint32_t drv_safety = 64;
-	for (USBDriver *p = dev->drivers; p && --drv_safety; ) {
+	USBDriver *drv_list = dev->drivers;
+	dev->drivers = NULL;
+	for (USBDriver *p = drv_list; p && --drv_safety; ) {
 		println("disconnect driver ", (uint32_t)p, HEX);
 		p->disconnect();
 		p->device = NULL;
 		USBDriver *next = p->next;
-		p->next = available_drivers;
-		available_drivers = p;
+		bool already_avail = false;
+		uint32_t chk = 64;
+		for (USBDriver *a = available_drivers; a && --chk; a = a->next) {
+			if (a == p) {
+				already_avail = true;
+				break;
+			}
+		}
+		if (!already_avail) {
+			p->next = available_drivers;
+			available_drivers = p;
+		} else {
+			p->next = NULL;
+		}
 		p = next;
 	}
 	print_driverlist("available_drivers", available_drivers);
