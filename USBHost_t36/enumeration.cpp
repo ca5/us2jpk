@@ -402,6 +402,7 @@ void USBHost::claim_drivers(Device_t *dev)
 		prev = driver;
 	}
 	// parse interfaces from config descriptor
+	g_dbg_stage = 243;
 	const uint8_t *p = enumbuf + 9;
 	const uint8_t *end = enumbuf + enumlen;
 	while (p < end) {
@@ -437,6 +438,7 @@ void USBHost::claim_drivers(Device_t *dev)
 				// an accurate length.  (end - p) is the rest
 				// of ALL descriptors, likely more interfaces
 				// this driver has no business parsing
+				g_dbg_stage = 244;
 				if (driver->claim(dev, 1, p, end - p)) {
 					// this driver claims iface
 					// remove it from available_drivers list

@@ -968,7 +968,13 @@ bool USBHost::queue_Transfer(Pipe_t *pipe, Transfer_t *transfer)
 {
 	// find halt qTD
 	Transfer_t *halt = (Transfer_t *)(pipe->qh.next);
-	while (!(halt->qtd.token & 0x40)) halt = (Transfer_t *)(halt->qtd.next);
+	uint32_t h_safety = 64;
+	while (((uint32_t)halt & 0xFFFFFFE0) && !(halt->qtd.token & 0x40) && --h_safety) {
+		halt = (Transfer_t *)(halt->qtd.next);
+	}
+	if (!((uint32_t)halt & 0xFFFFFFE0) || h_safety == 0) {
+		return false;
+	}
 	// transfer's token
 	uint32_t token = transfer->qtd.token;
 	// transfer becomes new halt qTD
@@ -1424,6 +1430,8 @@ void USBHost::add_qh_to_periodic_schedule(Pipe_t *pipe)
 #else
 	uint32_t interval = pipe->periodic_interval;
 	uint32_t offset = pipe->periodic_offset;
+	if (interval == 0) return;
+	g_dbg_stage = 246;
 	//println("  interval = ", interval);
 	//println("  offset =   ", offset);
 
@@ -1441,7 +1449,8 @@ void USBHost::add_qh_to_periodic_schedule(Pipe_t *pipe)
 		} else {
 			//println("  traverse list ", i);
 			// TODO: skip past iTD, siTD when/if we support isochronous
-			while (node->periodic_interval >= interval) {
+			uint32_t p_safety = 64;
+			while (node->periodic_interval >= interval && --p_safety) {
 				if (node == pipe) goto nextslot;
 				//print("  num ", num, HEX);
 				//print("  node ", (uint32_t)node, HEX);
@@ -1451,10 +1460,11 @@ void USBHost::add_qh_to_periodic_schedule(Pipe_t *pipe)
 				node = (Pipe_t *)(num & 0xFFFFFFE0);
 			}
 			Pipe_t *n = node;
+			uint32_t n_safety = 64;
 			do {
 				if (n == pipe) goto nextslot;
 				n = (Pipe_t *)(n->qh.horizontal_link & 0xFFFFFFE0);
-			} while (n != NULL);
+			} while (n != NULL && --n_safety);
 			//print("  adding at node ", (uint32_t)node, HEX);
 			//print(", num=", num, HEX);
 			//println(", node->qh.horizontal_link=", node->qh.horizontal_link, HEX);
