@@ -201,15 +201,20 @@ void USBHost::enumeration_transmit(Device_t *dev)
 // Otherwise, the control transfer is part of the enumeration process,
 // which is implemented here.
 //
+extern volatile uint32_t g_dbg_stage;
+
 void USBHost::enumeration_receive(const Transfer_t *transfer)
 {
 	Device_t *dev = transfer->pipe->device;
 
 	// If a driver created this control transfer, allow it to process the result
 	if (transfer->driver) {
+		g_dbg_stage = 202;
 		transfer->driver->control(transfer);
+		g_dbg_stage = 203;
 		return;
 	}
+	g_dbg_stage = 240;
 
 	//print_hexbytes(transfer->buffer, transfer->length);
 	//print(transfer);
@@ -395,6 +400,7 @@ void USBHost::claim_drivers(Device_t *dev)
 	const uint8_t *end = enumbuf + enumlen;
 	while (p < end) {
 		uint8_t desclen = *p;
+		if (desclen < 2) break; // prevent infinite loop on malformed descriptor
 		uint8_t desctype = *(p+1);
 		print("Descriptor ");
 		print(desctype);
@@ -413,8 +419,14 @@ void USBHost::claim_drivers(Device_t *dev)
 		if (desctype == 4 && desclen == 9) {
 			// found an interface, ask available drivers if they want it
 			prev = NULL;
-			for (driver=available_drivers; driver != NULL; driver = driver->next) {
-				if (driver->device != NULL) continue;
+			uint32_t drv_safety = 64;
+			for (driver=available_drivers; driver != NULL && --drv_safety; ) {
+				USBDriver *next_avail = driver->next;
+				if (driver->device != NULL) {
+					prev = driver;
+					driver = next_avail;
+					continue;
+				}
 				// TODO: should parse ahead and give claim()
 				// an accurate length.  (end - p) is the rest
 				// of ALL descriptors, likely more interfaces
@@ -423,17 +435,19 @@ void USBHost::claim_drivers(Device_t *dev)
 					// this driver claims iface
 					// remove it from available_drivers list
 					if (prev) {
-						prev->next = driver->next;
+						prev->next = next_avail;
 					} else {
-						available_drivers = driver->next;
+						available_drivers = next_avail;
 					}
 					// add to list of drivers using this device
 					driver->next = dev->drivers;
 					dev->drivers = driver;
 					driver->device = dev;
-					// not done, may be more interface for more drivers
+					break; // one driver per interface
+				} else {
+					prev = driver;
 				}
-				prev = driver;
+				driver = next_avail;
 			}
 		}
 		p += desclen;
