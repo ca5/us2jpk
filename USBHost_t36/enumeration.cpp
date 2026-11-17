@@ -475,6 +475,10 @@ void USBHost::disconnect_Device(Device_t *dev)
 	if (!dev) return;
 	println("disconnect_Device:");
 
+	if (dev->enum_state < 10) {
+		enumeration_busy = false;
+	}
+
 	// Disconnect all drivers using this device.  If this device is
 	// a hub, the hub driver is responsible for recursively calling
 	// this function to disconnect its downstream devices.
