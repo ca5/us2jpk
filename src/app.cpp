@@ -231,6 +231,37 @@ void loop() {
         update_usb_output();
     }
 
+    // 機器の応答不整合検知（能動的ハートビート & 自動バスリセット）
+    static uint32_t last_heartbeat = 0;
+    static uint32_t offline_since = 0;
+    static uint32_t last_auto_reset = 0;
+
+    if (any_device_online) {
+        offline_since = 0;
+        // キーボード認識中: 1秒ごとにLED状態同期（SET_REPORT）で生存確認
+        if (now - last_heartbeat >= 1000) {
+            last_heartbeat = now;
+            if (keyboard1) keyboard1.LEDS(keyboard_last_leds);
+            if (keyboard2) keyboard2.LEDS(keyboard_last_leds);
+        }
+    } else {
+        // 切替器またはケーブルが接続されているが、キーボード/マウスが応答しない状態
+        if (USBHS_PORTSC1 & USBHS_PORTSC_CCS) {
+            if (offline_since == 0) {
+                offline_since = now;
+            } else if (now - offline_since >= 1500) {
+                // 1.5秒以上機器が無応答の場合、OS相当のUSBバスリセット（5V電源再同期）を自動実行
+                if (now - last_auto_reset >= 4000) {
+                    last_auto_reset = now;
+                    Serial.println("[AUTO-RECOVERY] Device unresponsive on connected port. Executing USB bus reset!");
+                    USBHost::reset_host_port();
+                }
+            }
+        } else {
+            offline_since = 0;
+        }
+    }
+
     // 1秒ごとのリアルタイム診断ログ出力
     static uint32_t last_stat_print = 0;
     if (now - last_stat_print >= 1000) {

@@ -113,16 +113,20 @@ void USBHost::disconnect_root() {
 		USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
 		disconnect_Device(rootdev);
 		rootdev = NULL;
+	} else {
+		port_state = PORT_STATE_DISCONNECTED;
 	}
 }
 
 void USBHost::reset_host_port() {
 	println("reset_host_port: power cycling host VBUS");
+	disconnect_root();
 #if defined(__MK66FX1M0__)
 	// Power cycle USB host port VBUS (cuts 5V to KVM switch - electrical unplug/replug)
 	GPIOE_PCOR = (1 << 6); // VBUS OFF
 	delay(250);
 	GPIOE_PSOR = (1 << 6); // VBUS ON
+	USBHS_PORTSC1 |= USBHS_PORTSC_PP | USBHS_PORTSC_PFSC;
 #endif
 }
 
@@ -378,7 +382,12 @@ void USBHost::isr()
 				free_Transfer(p);
 				p = next;
 			} else {
-				// transfer still pending
+				// transfer still pending or errored
+				uint32_t token = p->qtd.token;
+				if ((token & 0x80) == 0 && (token & 0x7C) != 0) {
+					// Periodic transfer halted with error (device disconnected/switched)
+					host_needs_recovery = true;
+				}
 				p = p->next_followup;
 			}
 		}
@@ -395,7 +404,12 @@ void USBHost::isr()
 				free_Transfer(p);
 				p = next;
 			} else {
-				// transfer still pending
+				// transfer still pending or errored
+				uint32_t token = p->qtd.token;
+				if ((token & 0x80) == 0 && (token & 0x7C) != 0) {
+					// Periodic transfer halted with error (device disconnected/switched)
+					host_needs_recovery = true;
+				}
 				p = p->next_followup;
 			}
 		}
@@ -946,6 +960,7 @@ bool USBHost::followup_Transfer(Transfer_t *transfer)
 void USBHost::followup_Error(void)
 {
 	println("ERROR Followup");
+	host_needs_recovery = true;
 #if 0
 	println("Async followup list:");
 	Transfer_t *t = async_followup_first;
@@ -1045,6 +1060,15 @@ static uint32_t last_recovery_time = 0;
 void USBHost::check_reconnect()
 {
 	uint32_t now = millis();
+	if (host_needs_recovery) {
+		host_needs_recovery = false;
+		if (now - last_recovery_time >= 3000) {
+			last_recovery_time = now;
+			println("Recovery triggered by host error flag");
+			reset_host_port();
+			return;
+		}
+	}
 	if (port_state == PORT_STATE_DISCONNECTED) {
 		uint32_t portstat = USBHS_PORTSC1;
 		if (portstat & USBHS_PORTSC_CCS) {
