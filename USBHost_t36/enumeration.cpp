@@ -71,6 +71,7 @@ void USBHost::Task()
 			(driver->Task)();
 		}
 	}
+	check_reconnect();
 }
 
 // Drivers call this after they've completed initialization, so get themselves
@@ -332,6 +333,7 @@ void USBHost::enumeration_error(const Transfer_t *transfer)
 	} else {
 		println("too many errors, giving up enumeration");
 		USBHost::enumeration_busy = false;
+		disconnect_Device(dev);
 	}
 }
 
@@ -521,6 +523,7 @@ void USBHost::disconnect_Device(Device_t *dev)
 		}
 		prev_dev = p;
 	}
+	USBHost::on_device_disconnected(dev);
 }
 
 

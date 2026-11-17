@@ -276,6 +276,10 @@ class USBHost {
 public:
     static void begin();
     static void Task();
+    static void check_reconnect();
+    static void reset_host_port();
+    static void disconnect_root();
+    static void on_device_disconnected(Device_t *dev);
     static void countFree(uint32_t &devices, uint32_t &pipes, uint32_t &trans, uint32_t &strs);
 protected:
     static Pipe_t * new_Pipe(Device_t *dev, uint32_t type, uint32_t endpoint,

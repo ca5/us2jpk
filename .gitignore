@@ -3,5 +3,11 @@ build/**/*.o
 build/**/*.d
 build/*.elf
 
+# Test binaries
+test/test_runner
+
+# Scratch diagnostic files
+scratch/
+
 # macOS
 .DS_Store

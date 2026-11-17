@@ -38,7 +38,6 @@ static uint8_t mouse_buttons_prev = 0;
 static bool kbd_was_connected = false;
 
 // KVM 自動リカバリ用タイマー
-static uint32_t last_recovery_attempt = 0;
 static uint32_t last_device_seen_time = 0;
 static uint32_t last_led_blink = 0;
 static bool led_state = true;
@@ -62,6 +61,28 @@ static void update_usb_output() {
 
 // Raw キー押下ハンドラ
 void OnRawPress(uint8_t keycode) {
+    uint32_t now = millis();
+
+    // 復帰用ホットキー: Left Ctrlを素早く3回連続で押すと切替器ポートを強制リセット
+    static uint32_t last_ctrl_time = 0;
+    static uint8_t ctrl_tap_count = 0;
+    if (keycode == 103) { // Left Ctrl
+        if (now - last_ctrl_time <= 600) {
+            ctrl_tap_count++;
+            if (ctrl_tap_count >= 3) {
+                ctrl_tap_count = 0;
+                Serial.println("[HOTKEY] Triple-Ctrl recovery triggered!");
+                USBHost::reset_host_port();
+                return;
+            }
+        } else {
+            ctrl_tap_count = 1;
+        }
+        last_ctrl_time = now;
+    } else {
+        ctrl_tap_count = 0;
+    }
+
     if (keycode >= 103 && keycode < 111) {
         // 修飾キー (Left Ctrl .. Right GUI)
         uint8_t bit = 1 << (keycode - 103);
@@ -149,12 +170,13 @@ static void process_mouse(MouseController &mouse) {
 }
 
 void setup() {
-#if defined(DEBUG)
     Serial.begin(115200);
-#endif
 
     pinMode(13, OUTPUT);
     digitalWrite(13, HIGH);
+
+    // 復帰用ボタントリガー: Pin 0 (GNDと短絡/押しボタンスイッチで復帰)
+    pinMode(0, INPUT_PULLUP);
 
     converter.init();
 
@@ -177,6 +199,7 @@ void setup() {
     keyboard2.attachExtrasRelease(OnHIDExtrasRelease);
 
     last_device_seen_time = millis();
+    Serial.println("[BOOT] Teensy 3.6 US-JIS Converter ready.");
 }
 
 void loop() {
@@ -216,18 +239,36 @@ void loop() {
         update_usb_output();
     }
 
-    // --- KVM / 切替器 切り替え復帰の自動リカバリ ---
-    // 切替器で物理的に接続されている(CCS=1)のに、デバイスが未認識の状態が続いた場合、
-    // 自動的にポートリセットを発行して抜き差しと同じ再列挙を実行する
-    if (!any_device_online && (now - last_device_seen_time >= 800)) {
-        if (now - last_recovery_attempt >= 1500) {
-            last_recovery_attempt = now;
-            uint32_t portstat = USBHS_PORTSC1;
-            // bit 0: CCS (Current Connect Status)
-            if (portstat & USBHS_PORTSC_CCS) {
-                // ポートリセット (PR) を発行して自動再接続を開始
-                USBHS_PORTSC1 |= USBHS_PORTSC_PR;
-            }
+    // 1秒ごとのリアルタイム診断ログ出力
+    static uint32_t last_stat_print = 0;
+    if (now - last_stat_print >= 1000) {
+        last_stat_print = now;
+        Serial.printf("[DEBUG] t=%lu s | KBD=%d (VID:0x%04X PID:0x%04X) | MOUSE=%d | PORTSC=0x%08X | PIN0=%d\n",
+                      now / 1000,
+                      (int)kbd_now, keyboard1.idVendor(), keyboard1.idProduct(),
+                      (int)mouse_now,
+                      USBHS_PORTSC1,
+                      digitalRead(0));
+    }
+
+    // 復帰用ボタントリガー (Pin 0 を GND に接続/プッシュスイッチで復帰)
+    // 切替器から戻った際に Pin 0（端のピン）をGNDにショートさせるか、
+    // 外付けボタンを押すと即座に切替器給電遮断＆再認識を実行します
+    static uint32_t last_button_trigger = 0;
+    if (digitalRead(0) == LOW) {
+        if (now - last_button_trigger >= 1500) {
+            last_button_trigger = now;
+            Serial.println("[TRIGGER] Pin 0 button recovery triggered!");
+            USBHost::reset_host_port();
+        }
+    }
+
+    // シリアルからのデバッグコマンド受信 ('r' でホストポート・切替器電源リセット)
+    if (Serial.available()) {
+        char c = Serial.read();
+        if (c == 'r' || c == 'R') {
+            Serial.println("[CMD] Manual reset_host_port triggered via Serial!");
+            USBHost::reset_host_port();
         }
     }
 

@@ -225,19 +225,9 @@ void USBHIDParser::disconnect()
 // Called when the HID device sends a report
 void USBHIDParser::in_data(const Transfer_t *transfer)
 {
-	/*USBHDBGSerial.printf("HID: ");
-	uint8_t *pb = (uint8_t*)transfer->buffer;
-	for (uint8_t i = 0; i < transfer->length; i++) {
-		USBHDBGSerial.printf("%02x ",pb[i]);
-	}
-	USBHDBGSerial.printf("\n"); */
-
-	/*
-	print("HID: ");
-	print(use_report_id);
-	print(" - ");
-	print_hexbytes(transfer->buffer, transfer->length);
-	*/
+#if defined(DEBUG)
+	// Serial.printf("[HID IN] len=%d\n", transfer->length);
+#endif
 	const uint8_t *buf = (const uint8_t *)transfer->buffer;
 	uint32_t len = transfer->length;
 

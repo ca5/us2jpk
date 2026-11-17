@@ -104,14 +104,51 @@ static void remove_from_periodic_followup_list(Transfer_t *transfer);
 #define print   USBHost::print_
 #define println USBHost::println_
 
+static volatile bool host_needs_recovery = false;
+
+void USBHost::disconnect_root() {
+	if (rootdev) {
+		println("disconnect_root");
+		port_state = PORT_STATE_DISCONNECTED;
+		USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
+		disconnect_Device(rootdev);
+		rootdev = NULL;
+	}
+}
+
+void USBHost::reset_host_port() {
+	println("reset_host_port: power cycling host VBUS and resetting port");
+#if defined(__MK66FX1M0__)
+	// Power cycle USB host port VBUS (cuts 5V to KVM switch)
+	GPIOE_PCOR = (1 << 6); // VBUS OFF
+	delay(150);
+	GPIOE_PSOR = (1 << 6); // VBUS ON
+	delay(100);
+#endif
+	disconnect_root();
+	port_state = PORT_STATE_DEBOUNCE;
+	USBHS_GPTIMER0LD = 100000; // 100 ms debounce
+	USBHS_GPTIMER0CTL = USBHS_GPTIMERCTL_RST | USBHS_GPTIMERCTL_RUN;
+}
+
+void USBHost::on_device_disconnected(Device_t *dev) {
+	if (rootdev == dev) {
+		rootdev = NULL;
+		port_state = PORT_STATE_DISCONNECTED;
+		USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
+	}
+}
+
 void USBHost::begin()
 {
 #if defined(__MK66FX1M0__)
 	// Teensy 3.6 has USB host power controlled by PTE6
 	PORTE_PCR6 = PORT_PCR_MUX(1);
 	GPIOE_PDDR |= (1<<6);
+	GPIOE_PCOR = (1<<6); // Ensure USB host power starts OFF
+	delay(150);
 	GPIOE_PSOR = (1<<6); // turn on USB host power
-	delay(10);
+	delay(100);
 	println("sizeof Device = ", sizeof(Device_t));
 	println("sizeof Pipe = ", sizeof(Pipe_t));
 	println("sizeof Transfer = ", sizeof(Transfer_t));
@@ -278,6 +315,12 @@ void USBHost::begin()
 	USBHS_USBINTR |= USBHS_USBINTR_UEE | USBHS_USBINTR_SEE;
 	USBHS_USBINTR |= USBHS_USBINTR_UPIE | USBHS_USBINTR_UAIE;
 
+	if (USBHS_PORTSC1 & USBHS_PORTSC_CCS) {
+		println("Device already present at boot, starting debounce");
+		port_state = PORT_STATE_DEBOUNCE;
+		USBHS_GPTIMER0LD = 100000;
+		USBHS_GPTIMER0CTL = USBHS_GPTIMERCTL_RST | USBHS_GPTIMERCTL_RUN;
+	}
 }
 
 
@@ -357,12 +400,22 @@ void USBHost::isr()
 				free_Transfer(p);
 				p = next;
 			} else {
+				uint32_t token = p->qtd.token;
+				if (!(token & 0x80) && (token & 0x7C)) {
+					// periodic transfer error / halt (e.g. KVM switch disconnect)
+					println("periodic transfer error in UPI");
+					host_needs_recovery = true;
+					break;
+				}
 				// transfer still pending
 				p = p->next_followup;
 			}
 		}
 	}
 	if (stat & USBHS_USBSTS_UEI) {
+#if defined(DEBUG)
+		Serial.printf("[EHCI] UEI USB Error stat=0x%08X\n", stat);
+#endif
 		followup_Error();
 	}
 
@@ -388,9 +441,7 @@ void USBHost::isr()
 			} else {
 				println("    disconnect");
 				port_state = PORT_STATE_DISCONNECTED;
-				USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
-				disconnect_Device(rootdev);
-				rootdev = NULL;
+				host_needs_recovery = true;
 			}
 		}
 		if (portstat & USBHS_PORTSC_PEC) {
@@ -999,9 +1050,58 @@ void USBHost::followup_Error(void)
 
 		transfer = next;
 	}
-	// TODO: handle errors from periodic schedule!  USB devices which
-	// give this sort of error wanted for testing...
+	// Handle errors from periodic schedule (e.g. KVM switch disconnect)
+	Transfer_t *p = periodic_followup_first;
+	bool periodic_error = false;
+	while (p) {
+		uint32_t token = p->qtd.token;
+		if (!(token & 0x80) && (token & 0x7C)) {
+			periodic_error = true;
+			break;
+		}
+		p = p->next_followup;
+	}
+	if (periodic_error) {
+		println("periodic transfer error in followup_Error");
+		host_needs_recovery = true;
+	}
 	println("end of error followu");
+}
+
+static uint32_t disconnect_timestamp = 0;
+static uint32_t last_recovery_time = 0;
+
+void USBHost::check_reconnect()
+{
+	uint32_t now = millis();
+	if (host_needs_recovery) {
+		host_needs_recovery = false;
+		if (now - last_recovery_time >= 3000) {
+			last_recovery_time = now;
+			println("check_reconnect: resetting host port due to transfer error");
+			reset_host_port();
+			return;
+		}
+	}
+	if (port_state == PORT_STATE_DISCONNECTED) {
+		uint32_t portstat = USBHS_PORTSC1;
+		if (portstat & USBHS_PORTSC_CCS) {
+			if (disconnect_timestamp == 0) {
+				disconnect_timestamp = now;
+			} else if (now - disconnect_timestamp >= 200) {
+				disconnect_timestamp = 0;
+				if (now - last_recovery_time >= 3000) {
+					last_recovery_time = now;
+					println("Auto reconnect triggered");
+					reset_host_port();
+				}
+			}
+		} else {
+			disconnect_timestamp = 0;
+		}
+	} else {
+		disconnect_timestamp = 0;
+	}
 }
 
 static void add_to_async_followup_list(Transfer_t *first, Transfer_t *last)
@@ -1340,7 +1440,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 			// removing the only QH, so just shut down the async schedule
 			println("  shut down async schedule");
 			USBHS_USBCMD &= ~USBHS_USBCMD_ASE; // disable async schedule
-			while (USBHS_USBSTS & USBHS_USBSTS_AS) ; // busy loop wait
+			uint32_t wait_count = 100000;
+			while ((USBHS_USBSTS & USBHS_USBSTS_AS) && --wait_count) ; // busy loop wait with timeout
 			USBHS_ASYNCLISTADDR = 0;
 		} else {
 			// find the previous QH in the async schedule loop
@@ -1360,7 +1461,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 			// do the Async Advance Doorbell handshake to wait to be
 			// sure the EHCI no longer references the removed QH
 			USBHS_USBCMD |= USBHS_USBCMD_IAA;
-			while (!(USBHS_USBSTS & USBHS_USBSTS_AAI)) ; // busy loop wait
+			uint32_t wait_count = 100000;
+			while (!(USBHS_USBSTS & USBHS_USBSTS_AAI) && --wait_count) ; // busy loop wait with timeout
 			USBHS_USBSTS = USBHS_USBSTS_AAI;
 			// TODO: does this write interfere UPI & UAI (bits 18 & 19) ??
 		}
