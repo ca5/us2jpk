@@ -119,15 +119,95 @@ void USBHost::disconnect_root() {
 }
 
 void USBHost::reset_host_port() {
-	println("reset_host_port: power cycling host VBUS");
+	println("reset_host_port: power cycling host VBUS & full EHCI reset");
+	NVIC_DISABLE_IRQ(IRQ_USBHS);
+	host_needs_recovery = false;
 	disconnect_root();
+	enumeration_busy = false;
+	async_followup_first = NULL;
+	async_followup_last = NULL;
+	periodic_followup_first = NULL;
+	periodic_followup_last = NULL;
 #if defined(__MK66FX1M0__)
-	// Power cycle USB host port VBUS (cuts 5V to KVM switch - electrical unplug/replug)
+	// Power cycle USB host port VBUS (cuts 5V to KVM switch)
 	GPIOE_PCOR = (1 << 6); // VBUS OFF
 	delay(250);
 	GPIOE_PSOR = (1 << 6); // VBUS ON
-	USBHS_PORTSC1 |= USBHS_PORTSC_PP | USBHS_PORTSC_PFSC;
+	delay(100);
 #endif
+	// Full EHCI hardware controller reset (matches USBHost::begin())
+	USBHS_USBCMD |= USBHS_USBCMD_RST;
+	uint32_t rst_wait = 100000;
+	while ((USBHS_USBCMD & USBHS_USBCMD_RST) && --rst_wait) ;
+
+	for (int i=0; i < PERIODIC_LIST_SIZE; i++) {
+		periodictable[i] = 1;
+	}
+	memset(uframe_bandwidth, 0, sizeof(uframe_bandwidth));
+	port_state = PORT_STATE_DISCONNECTED;
+	USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
+
+	USBHS_USB_SBUSCFG = 1;
+	USBHS_USBMODE = USBHS_USBMODE_CM(3); // host mode
+	USBHS_USBINTR = 0;
+	USBHS_PERIODICLISTBASE = (uint32_t)periodictable;
+	USBHS_FRINDEX = 0;
+	USBHS_ASYNCLISTADDR = 0;
+	USBHS_USBCMD = USBHS_USBCMD_ITC(1) | USBHS_USBCMD_RS |
+		USBHS_USBCMD_ASP(3) | USBHS_USBCMD_ASPE | USBHS_USBCMD_PSE |
+		#if PERIODIC_LIST_SIZE == 8
+		USBHS_USBCMD_FS2 | USBHS_USBCMD_FS(3);
+		#elif PERIODIC_LIST_SIZE == 16
+		USBHS_USBCMD_FS2 | USBHS_USBCMD_FS(2);
+		#elif PERIODIC_LIST_SIZE == 32
+		USBHS_USBCMD_FS2 | USBHS_USBCMD_FS(1);
+		#elif PERIODIC_LIST_SIZE == 64
+		USBHS_USBCMD_FS2 | USBHS_USBCMD_FS(0);
+		#elif PERIODIC_LIST_SIZE == 128
+		USBHS_USBCMD_FS(3);
+		#elif PERIODIC_LIST_SIZE == 256
+		USBHS_USBCMD_FS(2);
+		#elif PERIODIC_LIST_SIZE == 512
+		USBHS_USBCMD_FS(1);
+		#elif PERIODIC_LIST_SIZE == 1024
+		USBHS_USBCMD_FS(0);
+		#endif
+
+	USBHS_PORTSC1 |= USBHS_PORTSC_PP;
+	USBHS_PORTSC1 |= USBHS_PORTSC_PFSC;
+	USBHS_USBSTS = USBHS_USBSTS; // clear any pending status bits
+
+	NVIC_ENABLE_IRQ(IRQ_USBHS);
+	USBHS_USBINTR = USBHS_USBINTR_PCE | USBHS_USBINTR_TIE0 | USBHS_USBINTR_TIE1
+		| USBHS_USBINTR_UEE | USBHS_USBINTR_SEE
+		| USBHS_USBINTR_UPIE | USBHS_USBINTR_UAIE;
+
+	if (USBHS_PORTSC1 & USBHS_PORTSC_CCS) {
+		port_state = PORT_STATE_DEBOUNCE;
+		USBHS_GPTIMER0LD = 100000;
+		USBHS_GPTIMER0CTL = USBHS_GPTIMERCTL_RST | USBHS_GPTIMERCTL_RUN;
+	}
+}
+
+uint8_t USBHost::get_port_state() {
+	return port_state;
+}
+
+void USBHost::get_debug_info(uint16_t &vid, uint16_t &pid, uint8_t &enum_st, uint8_t &err_cnt, uint8_t &has_root) {
+	Device_t *d = rootdev;
+	if (d) {
+		has_root = 1;
+		vid = d->idVendor;
+		pid = d->idProduct;
+		enum_st = d->enum_state;
+		err_cnt = d->enum_error_count;
+	} else {
+		has_root = 0;
+		vid = 0;
+		pid = 0;
+		enum_st = 255;
+		err_cnt = 0;
+	}
 }
 
 void USBHost::on_device_disconnected(Device_t *dev) {
@@ -447,7 +527,8 @@ void USBHost::isr()
 		if (portstat & USBHS_PORTSC_PEC) {
 			// PEC bit only detects disable
 			println("  disable");
-		} else if (port_state == PORT_STATE_RESET && portstat & USBHS_PORTSC_PE) {
+		}
+		if (port_state == PORT_STATE_RESET && (portstat & USBHS_PORTSC_PE)) {
 			println("  port enabled");
 			port_state = PORT_STATE_RECOVERY;
 			// 10 ms reset recover (USB 2.0: TRSTRCY, page 151 & 188)

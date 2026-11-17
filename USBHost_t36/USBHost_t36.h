@@ -280,6 +280,8 @@ public:
     static void reset_host_port();
     static void disconnect_root();
     static void on_device_disconnected(Device_t *dev);
+    static uint8_t get_port_state();
+    static void get_debug_info(uint16_t &vid, uint16_t &pid, uint8_t &enum_st, uint8_t &err_cnt, uint8_t &has_root);
     static void countFree(uint32_t &devices, uint32_t &pipes, uint32_t &trans, uint32_t &strs);
 protected:
     static Pipe_t * new_Pipe(Device_t *dev, uint32_t type, uint32_t endpoint,

@@ -231,19 +231,12 @@ void loop() {
         update_usb_output();
     }
 
-    // 機器の応答不整合検知（能動的ハートビート & 自動バスリセット）
-    static uint32_t last_heartbeat = 0;
+    // 機器の応答不整合検知（自動バスリセット）
     static uint32_t offline_since = 0;
     static uint32_t last_auto_reset = 0;
 
     if (any_device_online) {
         offline_since = 0;
-        // キーボード認識中: 1秒ごとにLED状態同期（SET_REPORT）で生存確認
-        if (now - last_heartbeat >= 1000) {
-            last_heartbeat = now;
-            if (keyboard1) keyboard1.LEDS(keyboard_last_leds);
-            if (keyboard2) keyboard2.LEDS(keyboard_last_leds);
-        }
     } else {
         // 切替器またはケーブルが接続されているが、キーボード/マウスが応答しない状態
         if (USBHS_PORTSC1 & USBHS_PORTSC_CCS) {
@@ -266,12 +259,16 @@ void loop() {
     static uint32_t last_stat_print = 0;
     if (now - last_stat_print >= 1000) {
         last_stat_print = now;
-        Serial.printf("[DEBUG] t=%lu s | KBD=%d (VID:0x%04X PID:0x%04X) | MOUSE=%d | PORTSC=0x%08X | PIN0=%d\n",
+        uint16_t r_vid = 0, r_pid = 0;
+        uint8_t r_est = 0, r_err = 0, r_has = 0;
+        USBHost::get_debug_info(r_vid, r_pid, r_est, r_err, r_has);
+        Serial.printf("[DEBUG] t=%lu s | KBD=%d | MOUSE=%d | PORTSC=0x%08X | PSTATE=%d | ROOT=%d(0x%04X:0x%04X est=%d err=%d)\n",
                       now / 1000,
-                      (int)kbd_now, keyboard1.idVendor(), keyboard1.idProduct(),
+                      (int)kbd_now,
                       (int)mouse_now,
                       USBHS_PORTSC1,
-                      digitalRead(0));
+                      (int)USBHost::get_port_state(),
+                      (int)r_has, r_vid, r_pid, (int)r_est, (int)r_err);
     }
 
     // 復帰用ホットキートリガー (Right Shift 3回押し)
