@@ -42,9 +42,12 @@ static uint32_t last_device_seen_time = 0;
 static uint32_t last_led_blink = 0;
 static bool led_state = true;
 
+extern volatile uint32_t g_dbg_stage;
+
 // USB 出力レポートの同期送信 (キーボード)
 static void update_usb_output() {
 #ifdef KEYBOARD_INTERFACE
+    g_dbg_stage = 250;
     uint8_t out_mod = converter.getOutputModifiers();
     const ActiveKey *keys = converter.getActiveKeys();
 
@@ -56,6 +59,7 @@ static void update_usb_output() {
     Keyboard.set_key5(keys[4].out_usage);
     Keyboard.set_key6(keys[5].out_usage);
     Keyboard.send_now();
+    g_dbg_stage = 251;
 #endif
 }
 
@@ -161,6 +165,17 @@ static void process_mouse(MouseController &mouse) {
 #endif
 }
 
+extern volatile uint32_t g_dbg_stage;
+static volatile uint32_t last_loop_heartbeat = 0;
+static IntervalTimer stuckTimer;
+
+static void stuck_monitor_isr() {
+    if (millis() - last_loop_heartbeat >= 2000) {
+        Serial.printf("[STUCK] stage=%lu PORTSC=0x%08X USBSTS=0x%08X\n",
+                      g_dbg_stage, USBHS_PORTSC1, USBHS_USBSTS);
+    }
+}
+
 void setup() {
     Serial.begin(115200);
 
@@ -191,14 +206,21 @@ void setup() {
     keyboard2.attachExtrasRelease(OnHIDExtrasRelease);
 
     last_device_seen_time = millis();
+    last_loop_heartbeat = millis();
+    stuckTimer.priority(64);
+    stuckTimer.begin(stuck_monitor_isr, 1000000); // 1 second
     Serial.println("[BOOT] Teensy 3.6 US-JIS Converter ready.");
 }
 
 void loop() {
     uint32_t now = millis();
+    last_loop_heartbeat = now;
+    g_dbg_stage = 1;
 
     // USB ホストタスク実行 (パケット処理)
+    g_dbg_stage = 2;
     myusb.Task();
+    g_dbg_stage = 3;
 
     // マウス入力処理 (mouse1, mouse2)
     process_mouse(mouse1);

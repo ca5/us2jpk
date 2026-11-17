@@ -472,9 +472,12 @@ static void pipe_set_addr(Pipe_t *pipe, uint32_t addr)
 }
 
 
+extern volatile uint32_t g_dbg_stage;
+
 void USBHost::disconnect_Device(Device_t *dev)
 {
 	if (!dev) return;
+	g_dbg_stage = 210;
 	println("disconnect_Device:");
 
 	if (dev->enum_state < 10) {
@@ -486,7 +489,9 @@ void USBHost::disconnect_Device(Device_t *dev)
 	// this function to disconnect its downstream devices.
 	print_driverlist("available_drivers", available_drivers);
 	print_driverlist("dev->drivers", dev->drivers);
-	for (USBDriver *p = dev->drivers; p; ) {
+	g_dbg_stage = 211;
+	uint32_t drv_safety = 64;
+	for (USBDriver *p = dev->drivers; p && --drv_safety; ) {
 		println("disconnect driver ", (uint32_t)p, HEX);
 		p->disconnect();
 		p->device = NULL;
@@ -498,16 +503,21 @@ void USBHost::disconnect_Device(Device_t *dev)
 	print_driverlist("available_drivers", available_drivers);
 
 	// delete all the pipes
-	for (Pipe_t *p = dev->data_pipes; p; ) {
+	g_dbg_stage = 212;
+	uint32_t pipe_safety = 64;
+	for (Pipe_t *p = dev->data_pipes; p && --pipe_safety; ) {
 		Pipe_t *next = p->next;
 		delete_Pipe(p);
 		p = next;
 	}
+	g_dbg_stage = 213;
 	delete_Pipe(dev->control_pipe);
 
 	// remove device from devlist and free its Device_t
+	g_dbg_stage = 214;
 	Device_t *prev_dev = NULL;
-	for (Device_t *p = devlist; p; p = p->next) {
+	uint32_t dev_safety = 64;
+	for (Device_t *p = devlist; p && --dev_safety; p = p->next) {
 		if (p == dev) {
 			if (prev_dev == NULL) {
 				devlist = p->next;

@@ -105,6 +105,7 @@ static void remove_from_periodic_followup_list(Transfer_t *transfer);
 #define println USBHost::println_
 
 static volatile bool host_needs_recovery = false;
+volatile uint32_t g_dbg_stage = 0;
 
 void USBHost::disconnect_root() {
 	if (rootdev) {
@@ -424,6 +425,7 @@ void USBHost::begin()
 
 void USBHost::isr()
 {
+	g_dbg_stage = 10;
 	uint32_t stat = USBHS_USBSTS;
 	USBHS_USBSTS = stat; // clear pending interrupts
 	//stat &= USBHS_USBINTR; // mask away unwanted interrupts
@@ -451,43 +453,39 @@ void USBHost::isr()
 #endif
 
 	if (stat & USBHS_USBSTS_UAI) { // completed qTD(s) from the async schedule
-		//println("Async Followup");
-		//print(async_followup_first, async_followup_last);
+		g_dbg_stage = 101;
 		Transfer_t *p = async_followup_first;
-		while (p) {
-			if (followup_Transfer(p)) {
-				// transfer completed
+		uint32_t loop_safety = 256;
+		while (p && --loop_safety) {
+			uint32_t token = p->qtd.token;
+			if ((token & 0xFC) == 0) {
 				Transfer_t *next = p->next_followup;
 				remove_from_async_followup_list(p);
+				followup_Transfer(p);
 				free_Transfer(p);
 				p = next;
 			} else {
-				// transfer still pending or errored
-				uint32_t token = p->qtd.token;
 				if ((token & 0x80) == 0 && (token & 0x7C) != 0) {
-					// Periodic transfer halted with error (device disconnected/switched)
 					host_needs_recovery = true;
 				}
 				p = p->next_followup;
 			}
 		}
-		//print(async_followup_first, async_followup_last);
 	}
 	if (stat & USBHS_USBSTS_UPI) { // completed qTD(s) from the periodic schedule
-		//println("Periodic Followup");
+		g_dbg_stage = 102;
 		Transfer_t *p = periodic_followup_first;
-		while (p) {
-			if (followup_Transfer(p)) {
-				// transfer completed
+		uint32_t loop_safety = 256;
+		while (p && --loop_safety) {
+			uint32_t token = p->qtd.token;
+			if ((token & 0xFC) == 0) {
 				Transfer_t *next = p->next_followup;
 				remove_from_periodic_followup_list(p);
+				followup_Transfer(p);
 				free_Transfer(p);
 				p = next;
 			} else {
-				// transfer still pending or errored
-				uint32_t token = p->qtd.token;
 				if ((token & 0x80) == 0 && (token & 0x7C) != 0) {
-					// Periodic transfer halted with error (device disconnected/switched)
 					host_needs_recovery = true;
 				}
 				p = p->next_followup;
@@ -495,6 +493,7 @@ void USBHost::isr()
 		}
 	}
 	if (stat & USBHS_USBSTS_UEI) {
+		g_dbg_stage = 13;
 		followup_Error();
 	}
 
@@ -519,6 +518,7 @@ void USBHost::isr()
 				}
 			} else {
 				println("    disconnect");
+				g_dbg_stage = 14;
 				port_state = PORT_STATE_DISCONNECTED;
 				USBPHY_CTRL_CLR = USBPHY_CTRL_ENHOSTDISCONDETECT;
 				disconnect_root();
@@ -606,6 +606,7 @@ void USBHost::isr()
 			list = next;
 		}
 	}
+	g_dbg_stage = 19;
 }
 
 void USBDriverTimer::start(uint32_t microseconds)
@@ -1030,7 +1031,9 @@ bool USBHost::followup_Transfer(Transfer_t *transfer)
 		// transfer is no longer active and does not have any error flags
 		if ((token & 0x8000) && (transfer->pipe->callback_function != NULL)) {
 			// do the callback
+			g_dbg_stage = 200;
 			(*(transfer->pipe->callback_function))(transfer);
+			g_dbg_stage = 201;
 		}
 		//println("    completed");
 		return true;
@@ -1145,7 +1148,7 @@ void USBHost::check_reconnect()
 		host_needs_recovery = false;
 		if (now - last_recovery_time >= 3000) {
 			last_recovery_time = now;
-			println("Recovery triggered by host error flag");
+			Serial.printf("[EHCI] host_needs_recovery -> reset_host_port()\n");
 			reset_host_port();
 			return;
 		}
@@ -1159,7 +1162,7 @@ void USBHost::check_reconnect()
 				disconnect_timestamp = 0;
 				if (now - last_recovery_time >= 3000) {
 					last_recovery_time = now;
-					println("Auto reconnect triggered");
+					Serial.printf("[EHCI] Auto reconnect -> reset_host_port()\n");
 					reset_host_port();
 				}
 			}
@@ -1541,7 +1544,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 		// find & free all the transfers which completed
 		println("  Free transfers");
 		Transfer_t *t = async_followup_first;
-		while (t) {
+		uint32_t t_safety = 256;
+		while (t && --t_safety) {
 			print("    * ", (uint32_t)t);
 			Transfer_t *next = t->next_followup;
 			if (t->pipe == pipe) {
@@ -1550,7 +1554,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 
 				// Only free if not in QH list
 				Transfer_t *tr = (Transfer_t *)(pipe->qh.next);
-				while (((uint32_t)tr & 0xFFFFFFE0) && (tr != t)){
+				uint32_t tr_safety = 128;
+				while (((uint32_t)tr & 0xFFFFFFE0) && (tr != t) && --tr_safety){
 					tr  = (Transfer_t *)(tr->qtd.next);
 				}
 				if (tr == t) {
@@ -1615,7 +1620,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 		// find & free all the transfers which completed
 		println("  Free transfers");
 		Transfer_t *t = periodic_followup_first;
-		while (t) {
+		uint32_t t_safety = 256;
+		while (t && --t_safety) {
 			print("    * ", (uint32_t)t);
 			Transfer_t *next = t->next_followup;
 			if (t->pipe == pipe) {
@@ -1624,7 +1630,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 
 				// Only free if not in QH list
 				Transfer_t *tr = (Transfer_t *)(pipe->qh.next);
-				while (((uint32_t)tr & 0xFFFFFFE0) && (tr != t)){
+				uint32_t tr_safety = 128;
+				while (((uint32_t)tr & 0xFFFFFFE0) && (tr != t) && --tr_safety){
 					tr  = (Transfer_t *)(tr->qtd.next);
 				}
 				if (tr == t) {
@@ -1645,7 +1652,8 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
 	// free all the transfers still attached to the QH
 	println("  Free transfers attached to QH");
 	Transfer_t *tr = (Transfer_t *)(pipe->qh.next);
-	while ((uint32_t)tr & 0xFFFFFFE0) {
+	uint32_t tr_safety = 128;
+	while (((uint32_t)tr & 0xFFFFFFE0) && --tr_safety) {
 		println("    * ", (uint32_t)tr);
 		Transfer_t *next = (Transfer_t *)(tr->qtd.next);
 		free_Transfer(tr);
