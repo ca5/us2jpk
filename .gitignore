@@ -1,0 +1,7 @@
+# Intermediate build files
+build/**/*.o
+build/**/*.d
+build/*.elf
+
+# macOS
+.DS_Store
